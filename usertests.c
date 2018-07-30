@@ -927,7 +927,6 @@ bigdir(void)
       exit();
     }
   }
-
   printf(1, "bigdir ok\n");
 }
 

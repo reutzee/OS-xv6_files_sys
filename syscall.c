@@ -103,6 +103,12 @@ extern int sys_unlink(void);
 extern int sys_wait(void);
 extern int sys_write(void);
 extern int sys_uptime(void);
+extern int sys_symlink(void);
+extern int sys_readlink(void);
+/*task 3*/
+extern int sys_ftag(void);
+extern int sys_funtag(void);
+extern int sys_gettag(void);
 
 static int (*syscalls[])(void) = {
 [SYS_fork]    sys_fork,
@@ -126,6 +132,11 @@ static int (*syscalls[])(void) = {
 [SYS_link]    sys_link,
 [SYS_mkdir]   sys_mkdir,
 [SYS_close]   sys_close,
+[SYS_symlink] sys_symlink,
+[SYS_readlink] sys_readlink,
+[SYS_ftag]   sys_ftag,
+[SYS_funtag] sys_funtag,
+[SYS_gettag] sys_gettag,
 };
 
 void

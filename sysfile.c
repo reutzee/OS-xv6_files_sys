@@ -16,6 +16,10 @@
 #include "file.h"
 #include "fcntl.h"
 
+
+
+
+
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
 static int
@@ -108,7 +112,6 @@ sys_fstat(void)
 {
   struct file *f;
   struct stat *st;
-
   if(argfd(0, 0, &f) < 0 || argptr(1, (void*)&st, sizeof(*st)) < 0)
     return -1;
   return filestat(f, st);
@@ -125,7 +128,7 @@ sys_link(void)
     return -1;
 
   begin_op();
-  if((ip = namei(old)) == 0){
+  if((ip = namei(old,O_NO_DERFRENCE)) == 0){
     end_op();
     return -1;
   }
@@ -141,7 +144,7 @@ sys_link(void)
   iupdate(ip);
   iunlock(ip);
 
-  if((dp = nameiparent(new, name)) == 0)
+  if((dp = nameiparent(new, name,O_NO_DERFRENCE)) == 0)
     goto bad;
   ilock(dp);
   if(dp->dev != ip->dev || dirlink(dp, name, ip->inum) < 0){
@@ -193,7 +196,7 @@ sys_unlink(void)
     return -1;
 
   begin_op();
-  if((dp = nameiparent(path, name)) == 0){
+  if((dp = nameiparent(path, name,0)) == 0){
     end_op();
     return -1;
   }
@@ -245,7 +248,7 @@ create(char *path, short type, short major, short minor)
   struct inode *ip, *dp;
   char name[DIRSIZ];
 
-  if((dp = nameiparent(path, name)) == 0)
+  if((dp = nameiparent(path, name,0)) == 0)
     return 0;
   ilock(dp);
 
@@ -275,6 +278,7 @@ create(char *path, short type, short major, short minor)
       panic("create dots");
   }
 
+
   if(dirlink(dp, name, ip->inum) < 0)
     panic("create: dirlink");
 
@@ -290,27 +294,37 @@ sys_open(void)
   int fd, omode;
   struct file *f;
   struct inode *ip;
-
+  int mode=0;
   if(argstr(0, &path) < 0 || argint(1, &omode) < 0)
     return -1;
 
   begin_op();
+  if((omode & O_NO_DERFRENCE) !=0)
+  {
+    omode=omode&(~O_NO_DERFRENCE);
+   // cprintf("mode  no derference\n");
+    mode=O_NO_DERFRENCE;
+  }
 
   if(omode & O_CREATE){
     ip = create(path, T_FILE, 0, 0);
     if(ip == 0){
       end_op();
+      //      cprintf("failledopen0\n");
+
       return -1;
     }
   } else {
-    if((ip = namei(path)) == 0){
-      end_op();
+    if((ip = namei(path,mode)) == 0){
+    end_op();
+        //    cprintf("failledopen1\n");
       return -1;
     }
     ilock(ip);
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();
+      //cprintf("failledopen2\n");
       return -1;
     }
   }
@@ -320,6 +334,7 @@ sys_open(void)
       fileclose(f);
     iunlockput(ip);
     end_op();
+    //cprintf("failled open3\n");
     return -1;
   }
   iunlock(ip);
@@ -377,7 +392,7 @@ sys_chdir(void)
   struct proc *curproc = myproc();
   
   begin_op();
-  if(argstr(0, &path) < 0 || (ip = namei(path)) == 0){
+  if(argstr(0, &path) < 0 || (ip = namei(path,0)) == 0){
     end_op();
     return -1;
   }
@@ -442,4 +457,130 @@ sys_pipe(void)
   fd[0] = fd0;
   fd[1] = fd1;
   return 0;
+}
+
+
+
+
+
+
+int sys_symlink(void)
+{
+  char *old, *new;
+  
+   struct inode *ip;
+    if(argstr(0, &old) < 0 || argstr(1, &new) < 0)
+      return -1;
+    begin_op();
+    if((ip = create(new, T_SYM,0,0)) == 0){
+      end_op();
+      return -1;
+    }
+    ip->type = T_SYM;
+    iupdate(ip);      // update on-disk data
+    writei(ip, old, 0, strlen(old));    // write the old path into the inode of the new one
+    iunlockput(ip);
+    end_op();
+    return 0;
+    }
+int sys_readlink(void)
+{
+  char* path;
+  char* buf;
+  size_t bufsize;
+
+    if((argstr(0, &path) < 0) ||(argstr(1, &buf) < 0)|| (argint(2,(int*)&bufsize)<0))
+    {
+      return -1;
+    }
+
+    if(bufsize<strlen(path))
+    {
+      return -1;
+    }
+    //char tmp[100]={0};
+   // struct inode * ip= namex(path,0,tmp,0,0,O_NO_DERFRENCE);
+      struct inode * ip =namei(path,O_NO_DERFRENCE);
+    if(ip==0)
+    {
+      return -1;
+    }
+    if(ip->type!= T_SYM)
+    {
+      return -1;
+    }
+
+    readi(ip,buf,0,ip->size);
+  return 0;
+}
+
+
+int sys_ftag(void)
+{
+  int fd;
+  char* key;
+  char* value;
+  int ret_val;
+
+  if((argint(0, &fd) < 0) ||(argstr(1, &key) < 0) || (argstr(2, &value) < 0))
+  {
+      return -1;
+  } 
+
+  if( (strlen(key) > 10) || (strlen(value) > 30) )
+  {
+    return -1;
+  }
+
+   begin_op();
+
+   ret_val = ftag(fd, key, value);
+   end_op();
+   return ret_val;
+}
+
+int sys_funtag(void)
+{
+
+ int fd;  
+ int ret_val;
+ char* key;
+
+ if((argint(0, &fd) < 0) ||(argstr(1, &key) < 0) )
+  {
+      return -1;
+  } 
+
+  if( (strlen(key) > 10) )
+  {
+    return -1;
+  }
+
+  begin_op();
+  ret_val =  funtag(fd,key);
+  end_op();
+  return ret_val;
+  //return 0;
+}
+
+int sys_gettag(void)
+{
+
+  int fd;
+  char* key;
+  char* buf;
+  int ret_val;
+
+  if((argint(0, &fd) < 0) || (argstr(1, &key) < 0) || (argstr(2, &buf) < 0) )
+  {
+      return -1;
+  }  
+
+  begin_op();
+
+  ret_val = gettag(fd,key,buf);
+
+  end_op();
+  return ret_val;
+ //return 0; 
 }

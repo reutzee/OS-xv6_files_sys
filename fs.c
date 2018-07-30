@@ -20,7 +20,9 @@
 #include "fs.h"
 #include "buf.h"
 #include "file.h"
+#include "fcntl.h"
 
+#define MAX_DEREFERENCE 31
 #define min(a, b) ((a) < (b) ? (a) : (b))
 static void itrunc(struct inode*);
 // there should be one superblock per disk device, but we run with
@@ -223,7 +225,6 @@ iupdate(struct inode *ip)
 {
   struct buf *bp;
   struct dinode *dip;
-
   bp = bread(ip->dev, IBLOCK(ip->inum, sb));
   dip = (struct dinode*)bp->data + ip->inum%IPB;
   dip->type = ip->type;
@@ -231,6 +232,8 @@ iupdate(struct inode *ip)
   dip->minor = ip->minor;
   dip->nlink = ip->nlink;
   dip->size = ip->size;
+  dip->tags_dict=ip->tags_dict;
+  dip->num_tags=ip->num_tags;
   memmove(dip->addrs, ip->addrs, sizeof(ip->addrs));
   log_write(bp);
   brelse(bp);
@@ -304,6 +307,8 @@ ilock(struct inode *ip)
     ip->minor = dip->minor;
     ip->nlink = dip->nlink;
     ip->size = dip->size;
+    ip->tags_dict=dip->tags_dict;
+    ip->num_tags=dip->num_tags;
     memmove(ip->addrs, dip->addrs, sizeof(ip->addrs));
     brelse(bp);
     ip->valid = 1;
@@ -316,6 +321,18 @@ ilock(struct inode *ip)
 void
 iunlock(struct inode *ip)
 {
+    if(ip == 0)
+    {
+      cprintf("ip=0 iunlock\n");
+    }
+    if(ip->ref <1)
+    {
+      cprintf("ip->ref <1 ip->ref =%d \n",ip->ref);
+    }
+    if(!holdingsleep(&ip->lock))
+    {
+      cprintf("not holding sleep\n");
+    }
   if(ip == 0 || !holdingsleep(&ip->lock) || ip->ref < 1)
     panic("iunlock");
 
@@ -373,8 +390,10 @@ iunlockput(struct inode *ip)
 static uint
 bmap(struct inode *ip, uint bn)
 {
+  //addr 0...11(direct) 12(single) 13(double)
   uint addr, *a;
   struct buf *bp;
+  struct buf *bp1;
 
   if(bn < NDIRECT){
     if((addr = ip->addrs[bn]) == 0)
@@ -391,12 +410,39 @@ bmap(struct inode *ip, uint bn)
     a = (uint*)bp->data;
     if((addr = a[bn]) == 0){
       a[bn] = addr = balloc(ip->dev);
-      log_write(bp);
+      log_write(bp); //update the block is not-availble (used)
     }
     brelse(bp);
     return addr;
   }
 
+  bn -= NINDIRECT;
+  if(bn < DINDIRECT) // if size of file is in double range
+  {
+    // Load dindirect block, allocating if necessary.
+    if((addr = ip->addrs[NDIRECT+1]) == 0)
+    ip->addrs[NDIRECT+1] = addr = balloc(ip->dev);
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    //
+
+    if((addr = a[bn/NINDIRECT]) == 0){
+      a[bn/NINDIRECT] = addr = balloc(ip->dev);
+      log_write(bp);
+    }
+    brelse(bp);
+    // get data from 2-level a
+    bp1 = bread(ip->dev, addr);
+    a = (uint*)bp1->data;
+    // allocating if necessary
+    if((addr = a[bn%NINDIRECT]) == 0){
+      a[bn%NINDIRECT] = addr = balloc(ip->dev);
+      log_write(bp1);  //update the block is not-availble (used)
+    }
+    brelse(bp1);
+    return addr;
+  }
+  
   panic("bmap: out of range");
 }
 
@@ -408,9 +454,10 @@ bmap(struct inode *ip, uint bn)
 static void
 itrunc(struct inode *ip)
 {
-  int i, j;
-  struct buf *bp;
+  int i, j, w;
+  struct buf *bp,*bp2;
   uint *a;
+  uint * b;
 
   for(i = 0; i < NDIRECT; i++){
     if(ip->addrs[i]){
@@ -430,7 +477,34 @@ itrunc(struct inode *ip)
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
   }
+  //task 1
+  if(ip->addrs[NDIRECT+1])
+  {
+    bp=bread(ip->dev,ip->addrs[NDIRECT+1]);
+    a=(uint*)bp->data;
+    for(j=0;j<NINDIRECT;j++)
+    {
+      if(a[j])//first table isnt null
+      {
+        bp2=bread(ip->dev,a[j]);
+        b=(uint*)bp2->data;
+        for(w=0;w<NINDIRECT;w++)
+        {
+          if(b[w])
+          {
+            bfree(ip->dev,b[w]);
+          }//b[i]
+        }
+        brelse(bp2);
+        bfree(ip->dev,a[j]);
+      }//a[j]
+    }
 
+    brelse(bp);
+    bfree(ip->dev,ip->addrs[NDIRECT+1]);//free main double indirect table
+    ip->addrs[NDIRECT+1]=0;
+  }
+  
   ip->size = 0;
   iupdate(ip);
 }
@@ -618,24 +692,33 @@ skipelem(char *path, char *name)
   return path;
 }
 
+
 // Look up and return the inode for a path name.
 // If parent != 0, return the inode for the parent and copy the final
 // path element into name, which must have room for DIRSIZ bytes.
 // Must be called inside a transaction since it calls iput().
 static struct inode*
-namex(char *path, int nameiparent, char *name)
+namex(char *path, int nameiparent, char *name,struct inode * feather_inode,int num_loops,int mode)
 {
+  if(num_loops>MAX_DEREFERENCE)
+  {
+    return 0;
+  }
   struct inode *ip, *next;
-
+  char tmp_name[DIRSIZ];
   if(*path == '/')
     ip = iget(ROOTDEV, ROOTINO);
-  else
+  else if(feather_inode)
+  {
+    ip = idup(feather_inode);
+}
+    else
     ip = idup(myproc()->cwd);
-
   while((path = skipelem(path, name)) != 0){
     ilock(ip);
     if(ip->type != T_DIR){
       iunlockput(ip);
+     // cprintf("ip->type is symlink");
       return 0;
     }
     if(nameiparent && *path == '\0'){
@@ -645,27 +728,301 @@ namex(char *path, int nameiparent, char *name)
     }
     if((next = dirlookup(ip, name, 0)) == 0){
       iunlockput(ip);
+     // cprintf("failled lookfor dir %s  =name \n",name);
       return 0;
     }
-    iunlockput(ip);
+    iunlock(ip);
+    ilock(next);
+    if(next->type==T_SYM && *path=='\0' && ((mode & O_NO_DERFRENCE)!=0))
+    {
+     // cprintf("last inode in loop nodreference\n");
+      iput(ip);
+      iunlock(next);
+      ip=next;
+      continue;
+    }
+    else if(next->type == T_SYM)
+    {
+      if(*path==0)
+      {
+      //  cprintf("path=0\n");
+     //   cprintf("mode =%x \n",mode);
+      }
+     // cprintf("at t_sym case path =%s \n",path);
+      char* buff=kalloc();
+      memset(buff,0,PGSIZE);
+      if(next->size!=readi(next,buff,0,next->size))
+      {
+        iunlockput(next);
+        iput(ip);
+        kfree(buff);
+        return 0;
+      }
+      buff[next->size]=0;
+//      cprintf("buff =%s \n",buff);
+      iunlockput(next);
+      next=namex(buff,0,tmp_name,ip,num_loops+1,0);//path,isparent,nameptr,inodeofparent,numiter,mode
+      kfree(buff);
+    }
+    else
+    {
+      iunlock(next);
+    }
+    iput(ip);
     ip = next;
   }
   if(nameiparent){
     iput(ip);
     return 0;
   }
+  if(ip->type== T_SYM&& mode==0)
+  {
+  //  panic("bug if mode =0\n");//TOREMOVE
+  }
   return ip;
 }
 
+
 struct inode*
-namei(char *path)
+namei(char *path,int mode)
 {
   char name[DIRSIZ];
-  return namex(path, 0, name);
+  return namex(path, 0, name,0,0,mode);
 }
 
 struct inode*
-nameiparent(char *path, char *name)
+nameiparent(char *path, char *name,int mode)
 {
-  return namex(path, 1, name);
+  return namex(path, 1, name,0,0,mode);
+}
+
+
+//
+static int
+argfd(int n, int *pfd, struct file **pf)
+{
+  int fd;
+  struct file *f;
+
+  if(argint(n, &fd) < 0)
+    return -1;
+  if(fd < 0 || fd >= NOFILE || (f=myproc()->ofile[fd]) == 0)
+    return -1;
+  if(pfd)
+    *pfd = fd;
+  if(pf)
+    *pf = f;
+  return 0;
+}
+
+
+
+
+// TODO - WHAT IS THE MAX PAIRS NUMBER FOR EACH FILE
+int ftag (int fd, const char * key,  const char * value)
+{ 
+  struct file *fd_ptr; 
+  struct inode* ip;
+  struct buf* bp;
+  int i, j;
+  
+  if( (argfd(0,&fd, &fd_ptr) < 0 ) )
+  {
+    return -1;
+  }
+
+  int index_toadd = -1;
+  ip = fd_ptr->ip;
+  ilock(ip);
+
+  if( (ip->num_tags == 0) && (ip->tags_dict ==0) ) //if it is first time to insert 
+  {
+    ip->tags_dict = balloc(ip->dev); //allocate dict
+  }
+
+  bp = bread(ip->dev, ip->tags_dict); //get data to buf
+
+  i=0; 
+  j=0;
+
+  while( i < ip->num_tags )
+  {
+    if ((strlen(key) == strlen((char*)(&bp->data[j]))) &&
+        !(memcmp(key, &(bp->data[j]), strlen(key))))
+    {
+      //KEY FOUND
+
+      memset(&bp->data[j+10], 0, 30); //override the exited val
+      memmove(&bp->data[j+10], value, strlen(value)); 
+
+      ip->num_tags++;
+
+      log_write(bp);
+      brelse(bp);
+      iupdate(ip);
+      iunlock(ip);
+      return 0;
+    }
+
+    // if got to end
+    if(bp->data[j] == 0)
+    {
+      if(index_toadd == -1)
+      {
+        index_toadd = j;
+      }
+
+      i--;   
+    }
+    //inc 
+    i++;
+    j += 40; //key is 10, value is 30, pair is 40 total.
+
+  }
+
+   if (index_toadd == -1)
+   {
+    index_toadd = j;
+   }
+  
+
+  //key not exist, index_toadd is the next available cell
+  memset(&bp->data[index_toadd], 0, 40);
+  memmove(&bp->data[index_toadd], key, strlen(key));
+  memmove(&bp->data[index_toadd+10], value, strlen(value));
+
+  ip->num_tags++;
+
+  log_write(bp);
+  brelse(bp);
+  iupdate(ip);
+  iunlock(ip);
+  
+  return 0;
+}
+
+int funtag (int fd, const char * key)
+{
+  struct file *fd_ptr; 
+  struct inode* ip;
+  struct buf* bp;
+  int i, j;
+
+  if( (argfd(0,&fd, &fd_ptr) < 0 ) )
+  {
+    return -1;
+  }
+
+  ip = fd_ptr->ip;
+  ilock(ip);
+
+  //if dict is empty - not tags!!
+  if( (ip->num_tags == 0) && (ip->tags_dict ==0) )  //if it is first time to insert 
+  {
+    iunlock(ip);
+    return -1; //allocate dict
+  }
+
+  bp = bread(ip->dev, ip->tags_dict); 
+
+  i = 0;
+  j = 0;
+  while (i < ip->num_tags) 
+  {
+     if ((strlen(key) == strlen((char*)(&bp->data[j]))) &&
+      !(memcmp(key, &(bp->data[j]), strlen(key)))) 
+     {
+      //KEY FOUND
+      memset(&bp->data[j], 0, 40); //reset whole pair entry.
+      ip->num_tags--;
+      log_write(bp);
+      brelse(bp);
+      iupdate(ip);
+      iunlock(ip);
+      return 0;
+     }
+
+     if (bp->data[j] == 0)
+    {
+      i--;
+    }
+
+
+    //inc
+    i++;
+    j += 40;
+
+  }
+
+  //key not found - cant untag - fail !!
+  brelse(bp);
+  iunlock(ip);
+  return -1;
+
+
+
+}
+
+int gettag (int fd, const char * key, char * buf)
+{
+  struct file *fd_ptr; 
+  struct inode* ip;
+  struct buf* bp;
+  int i, j;
+
+  if( (argfd(0,&fd, &fd_ptr) < 0 ) )
+  {
+    return -1;
+  }
+  
+  ip = fd_ptr->ip;
+  ilock(ip);
+
+  if( (ip->num_tags == 0) && (ip->tags_dict ==0) )  //if it is first time to insert 
+  {
+
+    iunlock(ip);
+    return -1; //allocate dict
+  }
+
+
+  bp = bread(ip->dev, ip->tags_dict);
+  i=0;
+  j=0;
+
+  while (i < ip->num_tags) 
+  {
+    if ((strlen(key) == strlen((char*)(&bp->data[j]))) &&
+        !(memcmp(key, &(bp->data[j]), strlen(key)))) 
+    {
+      //KEY FOUND - copy the value 
+      memmove(buf,&bp->data[j+10], 30); 
+
+      log_write(bp);
+      brelse(bp);
+      iupdate(ip);
+      iunlock(ip);
+
+      //The function returns the length of value if successful 
+      return strlen(buf);
+
+    }
+
+    if (bp->data[j] == 0)
+    {
+      i--;
+    }
+
+    //inc
+    i++;
+    j+=40;
+  }
+
+  //key does NOT exist - fail!!
+  log_write(bp);
+  brelse(bp);
+  iupdate(ip);
+  iunlock(ip);
+  return -1;
+
 }

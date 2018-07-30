@@ -10,6 +10,7 @@ struct sleeplock;
 struct stat;
 struct superblock;
 
+typedef uint size_t;
 // bio.c
 void            binit(void);
 struct buf*     bread(uint, uint);
@@ -47,11 +48,20 @@ void            iunlock(struct inode*);
 void            iunlockput(struct inode*);
 void            iupdate(struct inode*);
 int             namecmp(const char*, const char*);
-struct inode*   namei(char*);
-struct inode*   nameiparent(char*, char*);
+struct inode*   namei(char*,int);
+struct inode*   nameiparent(char*, char*,int);
 int             readi(struct inode*, char*, uint, uint);
 void            stati(struct inode*, struct stat*);
 int             writei(struct inode*, char*, uint, uint);
+
+int  			symlink(const char* ,const char*);
+int 			readlink(const char*,char*,size_t);
+/*task 3*/
+int 			ftag (int , const char * , const char *);
+int 			funtag (int , const char *);
+int 			gettag (int , const char *, char * );
+
+
 
 // ide.c
 void            ideinit(void);
@@ -155,6 +165,7 @@ int             argstr(int, char**);
 int             fetchint(uint, int*);
 int             fetchstr(uint, char**);
 void            syscall(void);
+
 
 // timer.c
 void            timerinit(void);

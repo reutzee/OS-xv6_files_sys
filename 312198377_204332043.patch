@@ -1,0 +1,2350 @@
+diff --git a/#Makefile# b/#Makefile#
+new file mode 100644
+index 0000000..1692387
+--- /dev/null
++++ b/#Makefile#
+@@ -0,0 +1,282 @@
++OBJS = \
++	bio.o\
++	console.o\
++	exec.o\
++	file.o\
++	fs.o\
++	ide.o\
++	ioapic.o\
++	kalloc.o\
++	kbd.o\
++	lapic.o\
++	log.o\
++	main.o\
++	mp.o\
++	picirq.o\
++	pipe.o\
++	proc.o\
++	sleeplock.o\
++	spinlock.o\
++	string.o\
++	swtch.o\
++	syscall.o\
++	sysfile.o\
++	sysproc.o\
++	trapasm.o\
++	trap.o\
++	uart.o\
++	vectors.o\
++	vm.o\
++
++# Cross-compiling (e.g., on Mac OS X)
++# TOOLPREFIX = i386-jos-elf
++
++# Using native tools (e.g., on X86 Linux)
++#TOOLPREFIX = 
++
++# Try to infer the correct TOOLPREFIX if not set
++ifndef TOOLPREFIX
++TOOLPREFIX := $(shell if i386-jos-elf-objdump -i 2>&1 | grep '^elf32-i386$$' >/dev/null 2>&1; \
++	then echo 'i386-jos-elf-'; \
++	elif objdump -i 2>&1 | grep 'elf32-i386' >/dev/null 2>&1; \
++	then echo ''; \
++	else echo "***" 1>&2; \
++	echo "*** Error: Couldn't find an i386-*-elf version of GCC/binutils." 1>&2; \
++	echo "*** Is the directory with i386-jos-elf-gcc in your PATH?" 1>&2; \
++	echo "*** If your i386-*-elf toolchain is installed with a command" 1>&2; \
++	echo "*** prefix other than 'i386-jos-elf-', set your TOOLPREFIX" 1>&2; \
++	echo "*** environment variable to that prefix and run 'make' again." 1>&2; \
++	echo "*** To turn off this error, run 'gmake TOOLPREFIX= ...'." 1>&2; \
++	echo "***" 1>&2; exit 1; fi)
++endif
++
++# If the makefile can't find QEMU, specify its path here
++# QEMU = qemu-system-i386
++
++# Try to infer the correct QEMU
++ifndef QEMU
++QEMU = $(shell if which qemu > /dev/null; \
++	then echo qemu; exit; \
++	elif which qemu-system-i386 > /dev/null; \
++	then echo qemu-system-i386; exit; \
++	elif which qemu-system-x86_64 > /dev/null; \
++	then echo qemu-system-x86_64; exit; \
++	else \
++	qemu=/Applications/Q.app/Contents/MacOS/i386-softmmu.app/Contents/MacOS/i386-softmmu; \
++	if test -x $$qemu; then echo $$qemu; exit; fi; fi; \
++	echo "***" 1>&2; \
++	echo "*** Error: Couldn't find a working QEMU executable." 1>&2; \
++	echo "*** Is the directory containing the qemu binary in your PATH" 1>&2; \
++	echo "*** or have you tried setting the QEMU variable in Makefile?" 1>&2; \
++	echo "***" 1>&2; exit 1)
++endif
++
++CC = $(TOOLPREFIX)gcc
++AS = $(TOOLPREFIX)gas
++LD = $(TOOLPREFIX)ld
++OBJCOPY = $(TOOLPREFIX)objcopy
++OBJDUMP = $(TOOLPREFIX)objdump
++CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -m32 -Werror -fno-omit-frame-pointer
++#CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -fvar-tracking -fvar-tracking-assignments -O0 -g -Wall -MD -gdwarf-2 -m32 -Werror -fno-omit-frame-pointer
++CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
++ASFLAGS = -m32 -gdwarf-2 -Wa,-divide
++# FreeBSD ld wants ``elf_i386_fbsd''
++LDFLAGS += -m $(shell $(LD) -V | grep elf_i386 2>/dev/null | head -n 1)
++
++xv6.img: bootblock kernel fs.img
++	dd if=/dev/zero of=xv6.img count=10000
++	dd if=bootblock of=xv6.img conv=notrunc
++	dd if=kernel of=xv6.img seek=1 conv=notrunc
++
++xv6memfs.img: bootblock kernelmemfs
++	dd if=/dev/zero of=xv6memfs.img count=10000
++	dd if=bootblock of=xv6memfs.img conv=notrunc
++	dd if=kernelmemfs of=xv6memfs.img seek=1 conv=notrunc
++
++bootblock: bootasm.S bootmain.c
++	$(CC) $(CFLAGS) -fno-pic -O -nostdinc -I. -c bootmain.c
++	$(CC) $(CFLAGS) -fno-pic -nostdinc -I. -c bootasm.S
++	$(LD) $(LDFLAGS) -N -e start -Ttext 0x7C00 -o bootblock.o bootasm.o bootmain.o
++	$(OBJDUMP) -S bootblock.o > bootblock.asm
++	$(OBJCOPY) -S -O binary -j .text bootblock.o bootblock
++	./sign.pl bootblock
++
++entryother: entryother.S
++	$(CC) $(CFLAGS) -fno-pic -nostdinc -I. -c entryother.S
++	$(LD) $(LDFLAGS) -N -e start -Ttext 0x7000 -o bootblockother.o entryother.o
++	$(OBJCOPY) -S -O binary -j .text bootblockother.o entryother
++	$(OBJDUMP) -S bootblockother.o > entryother.asm
++
++initcode: initcode.S
++	$(CC) $(CFLAGS) -nostdinc -I. -c initcode.S
++	$(LD) $(LDFLAGS) -N -e start -Ttext 0 -o initcode.out initcode.o
++	$(OBJCOPY) -S -O binary initcode.out initcode
++	$(OBJDUMP) -S initcode.o > initcode.asm
++
++kernel: $(OBJS) entry.o entryother initcode kernel.ld
++	$(LD) $(LDFLAGS) -T kernel.ld -o kernel entry.o $(OBJS) -b binary initcode entryother
++	$(OBJDUMP) -S kernel > kernel.asm
++	$(OBJDUMP) -t kernel | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > kernel.sym
++
++# kernelmemfs is a copy of kernel that maintains the
++# disk image in memory instead of writing to a disk.
++# This is not so useful for testing persistent storage or
++# exploring disk buffering implementations, but it is
++# great for testing the kernel on real hardware without
++# needing a scratch disk.
++MEMFSOBJS = $(filter-out ide.o,$(OBJS)) memide.o
++kernelmemfs: $(MEMFSOBJS) entry.o entryother initcode kernel.ld fs.img
++	$(LD) $(LDFLAGS) -T kernel.ld -o kernelmemfs entry.o  $(MEMFSOBJS) -b binary initcode entryother fs.img
++	$(OBJDUMP) -S kernelmemfs > kernelmemfs.asm
++	$(OBJDUMP) -t kernelmemfs | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > kernelmemfs.sym
++
++tags: $(OBJS) entryother.S _init
++	etags *.S *.c
++
++vectors.S: vectors.pl
++	perl vectors.pl > vectors.S
++
++ULIB = ulib.o usys.o printf.o umalloc.o
++
++_%: %.o $(ULIB)
++	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
++	$(OBJDUMP) -S $@ > $*.asm
++	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $*.sym
++
++_forktest: forktest.o $(ULIB)
++	# forktest has less library code linked in - needs to be small
++	# in order to be able to max out the proc table.
++	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o _forktest forktest.o ulib.o usys.o
++	$(OBJDUMP) -S _forktest > forktest.asm
++
++mkfs: mkfs.c fs.h
++	gcc -Werror -Wall -o mkfs mkfs.c
++
++# Prevent deletion of intermediate files, e.g. cat.o, after first build, so
++# that disk image changes after first build are persistent until clean.  More
++# details:
++# http://www.gnu.org/software/make/manual/html_node/Chained-Rules.html
++.PRECIOUS: %.o
++
++UPROGS=\
++	_cat\
++	_echo\
++	_forktest\
++	_grep\
++	_init\
++	_kill\
++	_ln\
++	_ls\
++	_mkdir\
++	_rm\
++	_sh\
++	_stressfs\
++	_usertests\
++	_wc\
++	_zombie\
++	_fsan\
++	_find\
++	_ftag\
++
++fs.img: mkfs README $(UPROGS)
++	./mkfs fs.img README $(UPROGS)
++
++-include *.d
++
++clean: 
++	rm -f *.tex *.dvi *.idx *.aux *.log *.ind *.ilg \
++	*.o *.d *.asm *.sym vectors.S bootblock entryother \
++	initcode initcode.out kernel xv6.img fs.img kernelmemfs mkfs \
++	.gdbinit \
++	$(UPROGS)
++
++# make a printout
++FILES = $(shell grep -v '^\#' runoff.list)
++PRINT = runoff.list runoff.spec README toc.hdr toc.ftr $(FILES)
++
++xv6.pdf: $(PRINT)
++	./runoff
++	ls -l xv6.pdf
++
++print: xv6.pdf
++
++# run in emulators
++
++bochs : fs.img xv6.img
++	if [ ! -e .bochsrc ]; then ln -s dot-bochsrc .bochsrc; fi
++	bochs -q
++
++# try to generate a unique GDB port
++GDBPORT = $(shell expr `id -u` % 5000 + 25000)
++# QEMU's gdb stub command line changed in 0.11
++QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
++	then echo "-gdb tcp::$(GDBPORT)"; \
++	else echo "-s -p $(GDBPORT)"; fi)
++ifndef CPUS
++CPUS := 2
++endif
++QEMUOPTS = -drive file=fs.img,index=1,media=disk,format=raw -drive file=xv6.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
++
++qemu: fs.img xv6.img
++	$(QEMU) -serial mon:stdio $(QEMUOPTS)
++
++qemu-memfs: xv6memfs.img
++	$(QEMU) -drive file=xv6memfs.img,index=0,media=disk,format=raw -smp $(CPUS) -m 256
++
++qemu-nox: fs.img xv6.img
++	$(QEMU) -nographic $(QEMUOPTS)
++
++.gdbinit: .gdbinit.tmpl
++	sed "s/localhost:1234/localhost:$(GDBPORT)/" < $^ > $@
++
++qemu-gdb: fs.img xv6.img .gdbinit
++	@echo "*** Now run 'gdb'." 1>&2
++	$(QEMU) -serial mon:stdio $(QEMUOPTS) -S $(QEMUGDB)
++
++qemu-nox-gdb: fs.img xv6.img .gdbinit
++	@echo "*** Now run 'gdb'." 1>&2
++	$(QEMU) -nographic $(QEMUOPTS) -S $(QEMUGDB)
++
++# CUT HERE
++# prepare dist for students
++# after running make dist, probably want to
++# rename it to rev0 or rev1 or so on and then
++# check in that version.
++
++EXTRA=\
++	mkfs.c ulib.c user.h cat.c echo.c forktest.c grep.c kill.c\
++	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c zombie.c\
++	printf.c umalloc.c\
++	README dot-bochsrc *.pl toc.* runoff runoff1 runoff.list\
++	.gdbinit.tmpl gdbutil\
++
++dist:
++	rm -rf dist
++	mkdir dist
++	for i in $(FILES); \
++	do \
++		grep -v PAGEBREAK $$i >dist/$$i; \
++	done
++	sed '/CUT HERE/,$$d' Makefile >dist/Makefile
++	echo >dist/runoff.spec
++	cp $(EXTRA) dist
++
++dist-test:
++	rm -rf dist
++	make dist
++	rm -rf dist-test
++	mkdir dist-test
++	cp dist/* dist-test
++	cd dist-test; $(MAKE) print
++	cd dist-test; $(MAKE) bochs || true
++	cd dist-test; $(MAKE) qemu
++
++# update this rule (change rev#) when it is time to
++# make a new revision.
++tar:
++	rm -rf /tmp/xv6
++	mkdir -p /tmp/xv6
++	cp dist/* dist/.gdbinit.tmpl /tmp/xv6
++	(cd /tmp; tar cf - xv6) | gzip >xv6-rev10.tar.gz  # the next one will be 10 (9/17)
++
++.PHONY: dist-test dist
+diff --git a/.nfs000000000725be0600000162 b/.nfs000000000725be0600000162
+new file mode 100644
+index 0000000..e69de29
+diff --git a/Makefile b/Makefile
+index 06eea5d..108d1a9 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,3 +1,4 @@
++
+ OBJS = \
+ 	bio.o\
+ 	console.o\
+@@ -174,6 +175,9 @@ UPROGS=\
+ 	_usertests\
+ 	_wc\
+ 	_zombie\
++	_fsan\
++	_find\
++	_ftag\
+ 
+ fs.img: mkfs README $(UPROGS)
+ 	./mkfs fs.img README $(UPROGS)
+@@ -210,7 +214,7 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
+ 	then echo "-gdb tcp::$(GDBPORT)"; \
+ 	else echo "-s -p $(GDBPORT)"; fi)
+ ifndef CPUS
+-CPUS := 2
++CPUS :=2
+ endif
+ QEMUOPTS = -drive file=fs.img,index=1,media=disk,format=raw -drive file=xv6.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
+ 
+diff --git a/defs.h b/defs.h
+index 82fb982..4833e3b 100644
+--- a/defs.h
++++ b/defs.h
+@@ -10,6 +10,7 @@ struct sleeplock;
+ struct stat;
+ struct superblock;
+ 
++typedef uint size_t;
+ // bio.c
+ void            binit(void);
+ struct buf*     bread(uint, uint);
+@@ -47,12 +48,21 @@ void            iunlock(struct inode*);
+ void            iunlockput(struct inode*);
+ void            iupdate(struct inode*);
+ int             namecmp(const char*, const char*);
+-struct inode*   namei(char*);
+-struct inode*   nameiparent(char*, char*);
++struct inode*   namei(char*,int);
++struct inode*   nameiparent(char*, char*,int);
+ int             readi(struct inode*, char*, uint, uint);
+ void            stati(struct inode*, struct stat*);
+ int             writei(struct inode*, char*, uint, uint);
+ 
++int  			symlink(const char* ,const char*);
++int 			readlink(const char*,char*,size_t);
++/*task 3*/
++int 			ftag (int , const char * , const char *);
++int 			funtag (int , const char *);
++int 			gettag (int , const char *, char * );
++
++
++
+ // ide.c
+ void            ideinit(void);
+ void            ideintr(void);
+@@ -156,6 +166,7 @@ int             fetchint(uint, int*);
+ int             fetchstr(uint, char**);
+ void            syscall(void);
+ 
++
+ // timer.c
+ void            timerinit(void);
+ 
+diff --git a/exec.c b/exec.c
+index b40134f..a159ff1 100644
+--- a/exec.c
++++ b/exec.c
+@@ -21,7 +21,7 @@ exec(char *path, char **argv)
+ 
+   begin_op();
+ 
+-  if((ip = namei(path)) == 0){
++  if((ip = namei(path,0)) == 0){
+     end_op();
+     cprintf("exec: fail\n");
+     return -1;
+diff --git a/fcntl.h b/fcntl.h
+index d565483..e794eeb 100644
+--- a/fcntl.h
++++ b/fcntl.h
+@@ -2,3 +2,4 @@
+ #define O_WRONLY  0x001
+ #define O_RDWR    0x002
+ #define O_CREATE  0x200
++#define O_NO_DERFRENCE 0x8//1000 binary
+\ No newline at end of file
+diff --git a/file.h b/file.h
+index 0990c82..930c000 100644
+--- a/file.h
++++ b/file.h
+@@ -22,7 +22,9 @@ struct inode {
+   short minor;
+   short nlink;
+   uint size;
+-  uint addrs[NDIRECT+1];
++  uint addrs[NDIRECT+2]; // +1 double indirect
++  uint tags_dict;
++  uint num_tags;
+ };
+ 
+ // table mapping major device number to
+diff --git a/find.c b/find.c
+new file mode 100644
+index 0000000..ffc20a9
+--- /dev/null
++++ b/find.c
+@@ -0,0 +1,310 @@
++#include "types.h"
++#include "stat.h"
++#include "user.h"
++#include "fs.h"
++#include "fcntl.h"
++
++
++#define _BUFSIZE 512
++//Options
++int flag_follow = 1;
++
++//Tests
++int got_name = 0; //False
++char file_name[512]={0};
++
++int file_size = -1;
++int sign = 0;
++
++char file_type = 'n';
++int got_tag = 0; //False
++char key[10] = {0};
++char value[30] ={0};
++int q_mark_flag = 1; //False
++
++
++
++//function from ls.c
++char*
++fmtname(char *path)
++{
++  static char buf[DIRSIZ+1];
++  char *p;
++
++  // Find first character after last slash.
++  for(p=path+strlen(path); p >= path && *p != '/'; p--)
++    ;
++  p++;
++
++  // Return blank-padded name.
++  if(strlen(p) >= DIRSIZ)
++    return p;
++  memmove(buf, p, strlen(p));
++  memset(buf+strlen(p),0, DIRSIZ-strlen(p));
++  return buf;
++}
++
++int 
++filter_it(int fd,struct stat st, char *name) 
++{
++    int type = st.type;
++    int size = st.size;
++    char value_data[30];
++    // if we got name
++    if(got_name==1 && (strcmp(file_name, name) != 0) )
++    {
++       // printf(1,"GOT NAME\n");
++        return -1; 
++    }
++    // if we got size
++    if(file_size != -1)
++    {
++     //   printf(1,"GOT SIZE\n");
++        switch(sign)
++        {
++            case 1: if(file_size  >= size) return -1; break;
++            case -1: if(file_size  < size) return -1; break;
++            default: if(file_size  != size) return -1; break;
++        }
++    }
++
++    // if we got type
++    if (file_type != 'n')
++    {
++      //  printf(1,"GOT TYPE %d \n",type);
++        switch(file_type)
++        {
++
++            case 'd': if (type != T_DIR) return -1; break;
++            case 'f': if (type != T_FILE) return -1; break; 
++            case 's': if ((type != T_SYM)) return -1; break;
++
++        }
++    }
++
++    // if we got tag value=tag
++    if(got_tag ==1)
++    {
++      //  printf(1,"GOT TAG\n");
++        if (gettag(fd,key,value_data) > 0) //if success
++        {
++            // if got NO "?" must check the val correctness
++            if(q_mark_flag==1) 
++            {
++                //if the actual value not equal to the given value - byebye
++                if(strcmp(value,value_data)!=0)
++                {
++                    return -1;
++                }
++            }
++        }
++
++        //if gettag failed - byebye
++        else return -1;
++    }
++
++    //file is OK for the filter
++    return 0;
++
++
++}
++
++
++void 
++find(char* path, char *name) 
++{
++    char *p;
++    char* buf=(char*)(malloc(sizeof(char)*_BUFSIZE));
++    memset(buf,0,_BUFSIZE);
++    int fd;
++    struct dirent de;
++    struct stat st;
++    // in case for symlink
++    char* sym_path=(char*)(malloc(sizeof(char)*_BUFSIZE));
++    memset(sym_path,0,_BUFSIZE);
++
++
++    if (flag_follow==0)//True
++    {
++      if((fd = open(path, 0)) < 0)
++      {
++              printf(2, "find: cannot open in O_NO_DERFRENCE%s\n", path);
++              free(buf);
++              free(sym_path);
++              return;
++      }
++    }
++    else
++    {
++      if((fd = open(path, O_NO_DERFRENCE)) < 0)
++      {
++              printf(2, "find: cannot open %s\n", path);
++              free(buf);
++              free(sym_path);
++              return;
++      }
++    }
++
++    if(fstat(fd, &st) < 0)
++    {
++        printf(2, "find: cannot stat %s\n", path);
++        close(fd);
++
++        free(buf);
++        free(sym_path);
++        return;
++    }
++
++    switch(st.type)
++    {
++        case T_FILE:
++            if(filter_it(fd, st, name) == 0)
++            {
++                printf(1, "%s\n", path);
++            }
++            break;
++
++        case T_SYM:
++            if(filter_it(fd, st, name) == 0)
++            {
++                printf(1, "%s\n", path);
++            }
++        
++            break;     
++        case T_DIR:
++            if(strlen(path) + 1 + DIRSIZ + 1 >  _BUFSIZE)
++            {
++                printf(1, "find: path too long\n");
++                break;
++            }
++            //symlink or not - buf it
++            strcpy(buf, path);
++            if(filter_it(fd, st, fmtname(path))==0)
++            {
++                printf(1, "%s\n", buf);
++            }
++            p = buf+strlen(buf);
++            if(strcmp(path,"/"))
++            *p++ = '/';
++            while(read(fd, &de, sizeof(de)) == sizeof(de))
++            {
++                if(de.inum == 0)
++                    continue;
++                memmove(p, de.name, DIRSIZ);
++                p[DIRSIZ] = 0;
++                //prevet inifinte loop
++                if (de.name[0] == '.')
++                    continue;
++                {
++                    find(buf, de.name);
++                }
++
++            }
++            break;
++
++    } //close switch
++
++    close(fd);
++
++     free(buf);
++     free(sym_path);
++    return;
++}
++int main(int argc, char *argv[])
++{   
++    int i;
++    char tmp;
++    //path is the ONLY mandatory argument
++    if(argc < 2 || strcmp(argv[1], "-follow") ==0 || strcmp(argv[1], "-name") ==0
++        || strcmp(argv[1], "-size") ==0 || strcmp(argv[1], "-type") ==0 || strcmp(argv[1], "-tag") ==0)
++    {
++        printf(1,"find: error less args\n");
++        exit();
++    }
++
++    //start from 2 because argv[0]=find, argv[1]=pathONLY 
++    for(i=2; i<argc; i++)
++    {
++        if(strcmp(argv[i], "-follow") == 0 )
++        {   
++            //printf(1,"got follow flag\n");
++
++            flag_follow = 0;
++        }
++        else if(strcmp(argv[i], "-name") == 0 )
++        {
++            if(i+1==argc)
++            {
++                printf(2,"find: missing argument to `-name'\n");
++                exit();
++            }
++            got_name = 1; //True
++            memset(file_name,0,512);
++            strcpy(file_name,argv[i+1]);
++        }
++
++        else if(strcmp(argv[i], "-size") ==0 )
++        {   
++
++            if(i+1==argc)
++            {
++                printf(2,"find: missing argument to `-size'\n");
++                exit();
++            }
++            tmp = argv[i+1][0];
++            switch(tmp)
++            {
++                case '+': sign = 1; file_size = atoi(&argv[i+1][1]); break;
++                case '-': sign = -1; file_size = atoi(&argv[i+1][1]); break;
++                default: sign = 0; file_size = atoi(&argv[i+1][0]); break;
++            }
++        }
++
++        else if(strcmp(argv[i], "-type") ==0 )
++        {
++             if(i+1==argc)
++            {
++                printf(2,"find: missing argument to `-type'\n");
++                exit();
++            }
++
++            tmp = argv[i+1][0];
++            switch(tmp)
++            {
++                case 'd': file_type = 'd'; break;
++                case 'f': file_type = 'f'; break;
++                case 's': file_type = 's'; break;
++                default: printf(2, "find: error invalid type: %c\n", tmp); exit();
++            }
++        }
++
++        // -tag <key>=<value>
++        else if(strcmp(argv[i], "-tag") ==0 )
++        {
++              if(i+1==argc)
++            {
++                printf(2,"find: missing argument to `-tag'\n");
++                exit();
++            }
++            got_tag = 1; //True
++            char* eq = strchr(argv[i+1],'=');
++            *eq = 0;
++
++            memset(key,0,10);
++            memset(value,0,30);
++            if (strcmp(eq+1, "?")==0)
++            {   
++                q_mark_flag = 0; //True
++            }
++            strcpy(key,argv[i+1]);
++            strcpy(value,eq+1);
++
++
++        }
++
++
++    }
++
++    find(argv[1], fmtname(argv[1]));
++    exit();
++}
+diff --git a/findbackup.c b/findbackup.c
+new file mode 100644
+index 0000000..dfa2eb0
+--- /dev/null
++++ b/findbackup.c
+@@ -0,0 +1,446 @@
++#include "types.h"
++#include "stat.h"
++#include "user.h"
++#include "fs.h"
++#include "fcntl.h"
++
++
++#define _BUFSIZE 512
++//Options
++int flag_follow = 1;
++
++//Tests
++int got_name = 0; //False
++char file_name[512]={0};
++
++int file_size = -1;
++int sign = 0;
++
++char file_type = 'n';
++int got_tag = 0; //False
++char key[10] = {0};
++char value[30] ={0};
++int q_mark_flag = 1; //False
++
++
++
++//function from ls.c
++char*
++fmtname(char *path)
++{
++  static char buf[DIRSIZ+1];
++  char *p;
++
++  // Find first character after last slash.
++  for(p=path+strlen(path); p >= path && *p != '/'; p--)
++    ;
++  p++;
++
++  // Return blank-padded name.
++  if(strlen(p) >= DIRSIZ)
++    return p;
++  memmove(buf, p, strlen(p));
++  memset(buf+strlen(p),0, DIRSIZ-strlen(p));
++  return buf;
++}
++
++int 
++filter_it(int fd,struct stat st, char *name) 
++{   
++    int type = st.type;
++    int size = st.size;
++
++    char value_data[30];
++    // if we got name
++    if(got_name==1 && (strcmp(file_name, name) != 0) )
++    {
++       // printf(1,"GOT NAME\n");
++        return -1; 
++    }
++    // if we got size
++    if(file_size != -1)
++    {
++     //   printf(1,"GOT SIZE\n");
++        switch(sign)
++        {
++            case 1: if(file_size  >= size) return -1; break;
++            case -1: if(file_size  < size) return -1; break;
++            default: if(file_size  != size) return -1; break;
++        }
++    }
++
++    // if we got type
++    if (file_type != 'n')
++    {
++      //  printf(1,"GOT TYPE %d \n",type);
++        switch(file_type)
++        {
++
++            case 'd': if (type != T_DIR) return -1; break;
++            case 'f': if (type != T_FILE) return -1; break; 
++            case 's': if ((type != T_SYM)) return -1; break;
++
++        }
++    }
++
++    // if we got tag value=tag
++    if(got_tag ==1)
++    {
++      //  printf(1,"GOT TAG\n");
++        if (gettag(fd,key,value_data) > 0) //if success
++        {
++            // if got NO "?" must check the val correctness
++            if(q_mark_flag==1) 
++            {
++                //if the actual value not equal to the given value - byebye
++                if(strcmp(value,value_data)!=0)
++                {
++                    return -1;
++                }
++            }
++        }
++
++        //if gettag failed - byebye
++        else return -1;
++    }
++
++    //file is OK for the filter
++    return 0;
++
++
++}
++
++
++void 
++find(char* path, char *name) 
++{
++//////////////////// 
++  //////////
++  ///////// TODO CALL READLINK AND FIND RECURSIVE WITH THE RET-ADDR !!!!
++  ////////////////
++    char *p;
++    char* buf=(char*)(malloc(sizeof(char)*_BUFSIZE));
++    memset(buf,0,_BUFSIZE);
++    int fd;
++    struct dirent de;
++    struct stat st;
++    // in case for symlink
++    char* sym_path=(char*)(malloc(sizeof(char)*_BUFSIZE));
++    memset(sym_path,0,_BUFSIZE);
++
++
++    if (flag_follow==0)//True
++    {
++      if((fd = open(path, O_NO_DERFRENCE)) < 0)
++      {
++              printf(2, "find: cannot open in O_NO_DERFRENCE%s\n", path);
++              free(buf);
++              free(sym_path);
++              return;
++      }
++    }
++    
++    else
++    {
++      if((fd = open(path, 0)) < 0)
++      {
++              printf(2, "find: cannot open %s\n", path);
++              free(buf);
++              free(sym_path);
++              return;
++      }
++    }
++
++    if(fstat(fd, &st) < 0)
++    {
++        printf(2, "find: cannot stat %s\n", path);
++        close(fd);
++
++        free(buf);
++        free(sym_path);
++        return;
++    }
++
++    switch(st.type)
++    {
++        case T_FILE:
++            if(filter_it(fd, st, name) == 0)
++            {
++                printf(1, "%s\n", path);
++            }
++            break;
++
++        case T_SYM:
++            if(flag_follow==1)//False
++        {
++            if(filter_it(fd, st, name) == 0)
++            {
++                printf(1, "%s\n", path);
++            }
++        }
++            break;     
++        case T_DIR:
++            if(strlen(path) + 1 + DIRSIZ + 1 >  _BUFSIZE)
++            {
++                printf(1, "find: path too long\n");
++                break;
++            }
++            //symlink or not - buf it
++            strcpy(buf, path);
++            if(filter_it(fd, st, fmtname(path))==0)
++            {
++                printf(1, "%s\n", buf);
++            }
++            p = buf+strlen(buf);
++            if(strcmp(path,"/"))
++            *p++ = '/';
++            while(read(fd, &de, sizeof(de)) == sizeof(de))
++            {
++                if(de.inum == 0)
++                    continue;
++                memmove(p, de.name, DIRSIZ);
++                p[DIRSIZ] = 0;
++                //prevet inifinte loop
++                if (de.name[0] == '.')
++                    continue;
++                //if got follow
++                //readlink (const char * pathname, char * buf, size_t bufsize)
++                // if( flag_follow==0 && readlink(buf,sym_path, 60)!=-1 )
++                // {
++                //     memset(tmp,0,_BUFSIZE);
++                //     strcpy(tmp, buf);
++                //     for(h=tmp+strlen(tmp); h >= tmp && *h != '/'; h--)
++                //     {
++                //         *h=0;
++                //     }
++                //     //recursive on it
++                //     find(sym_path, fmtname(sym_path));
++                // }
++                // else
++                {
++                    find(buf, de.name);
++                }
++
++            }
++            break;
++
++    } //close switch
++
++    close(fd);
++
++     free(buf);
++     free(sym_path);
++    return;
++}
++int main(int argc, char *argv[])
++{   
++    int i;
++    char tmp;
++    //path is the ONLY mandatory argument
++    if(argc < 2 || strcmp(argv[1], "-follow") ==0 || strcmp(argv[1], "-name") ==0
++        || strcmp(argv[1], "-size") ==0 || strcmp(argv[1], "-type") ==0 || strcmp(argv[1], "-tag") ==0)
++    {
++        printf(1,"find: error less args\n");
++        exit();
++    }
++
++    //start from 2 because argv[0]=find, argv[1]=pathONLY 
++    for(i=2; i<argc; i++)
++    {
++        if(strcmp(argv[i], "-follow") == 0 )
++        {   
++            //printf(1,"got follow flag\n");
++
++            flag_follow = 0;
++        }
++        else if(strcmp(argv[i], "-name") == 0 )
++        {
++            if(i+1==argc)
++            {
++                printf(2,"find: missing argument to `-name'\n");
++                exit();
++            }
++            got_name = 1; //True
++            memset(file_name,0,512);
++            strcpy(file_name,argv[i+1]);
++            //printf(1,"got name tag = %s \n",file_name);
++        }
++
++        else if(strcmp(argv[i], "-size") ==0 )
++        {   
++
++            if(i+1==argc)
++            {
++                printf(2,"find: missing argument to `-size'\n");
++                exit();
++            }
++            tmp = argv[i+1][0];
++            switch(tmp)
++            {
++                case '+': sign = 1; file_size = atoi(&argv[i+1][1]); break;
++                case '-': sign = -1; file_size = atoi(&argv[i+1][1]); break;
++                default: sign = 0; file_size = atoi(&argv[i+1][0]); break;
++            }
++        }
++
++        else if(strcmp(argv[i], "-type") ==0 )
++        {
++             if(i+1==argc)
++            {
++                printf(2,"find: missing argument to `-type'\n");
++                exit();
++            }
++
++            tmp = argv[i+1][0];
++            switch(tmp)
++            {
++                case 'd': file_type = 'd'; break;
++                case 'f': file_type = 'f'; break;
++                case 's': file_type = 's'; break;
++                default: printf(2, "find: error invalid type: %c\n", tmp); exit();
++            }
++        }
++
++        // -tag <key>=<value>
++        else if(strcmp(argv[i], "-tag") ==0 )
++        {
++              if(i+1==argc)
++            {
++                printf(2,"find: missing argument to `-tag'\n");
++                exit();
++            }
++            got_tag = 1; //True
++            char* eq = strchr(argv[i+1],'=');
++            *eq = 0;
++
++            memset(key,0,10);
++            memset(value,0,30);
++            if (strcmp(eq+1, "?")==0)
++            {   
++                q_mark_flag = 0; //True
++            }
++            strcpy(key,argv[i+1]);
++            strcpy(value,eq+1);
++
++
++        }
++
++    }
++
++    find(argv[1], fmtname(argv[1]));
++
++
++    exit();
++}
++
++
++
++
++
++
++// {
++//     char *p;
++//     char* h;
++//     char* tmp=(char*)(malloc(sizeof(char)*_BUFSIZE));
++//     char* buf=(char*)(malloc(sizeof(char)*_BUFSIZE));
++//     memset(buf,0,_BUFSIZE);
++//     int fd;
++//     struct dirent de;
++//     struct stat st;
++//     // in case for symlink
++//     char* sym_path=(char*)(malloc(sizeof(char)*_BUFSIZE));
++//     memset(sym_path,0,_BUFSIZE);
++//     if((fd = open(path, O_NO_DERFRENCE)) < 0)
++//     {
++//             printf(2, "find: cannot open %s\n", path);
++//             free(buf);
++//             free(sym_path);
++//             return;
++//     }
++
++//     if(fstat(fd, &st) < 0)
++//     {
++//         printf(2, "find: cannot stat %s\n", path);
++//         close(fd);
++
++//         free(buf);
++//         free(sym_path);
++//         return;
++//     }
++
++//     switch(st.type)
++//     {
++//         case T_FILE:
++//             if(filter_it(fd, st, name) == 0)
++//             {
++//                 printf(1, "%s\n", path);
++//             }
++//             break;
++
++//         case T_SYM:
++//             if(flag_follow!=0)
++//         {
++//             if(filter_it(fd, st, name) == 0)
++//             {
++//                 printf(1, "%s\n", path);
++//             }
++//         }
++//             break;     
++//         case T_DIR:
++//             if(strlen(path) + 1 + DIRSIZ + 1 >  _BUFSIZE)
++//             {
++//                 printf(1, "find: path too long\n");
++//                 break;
++//             }
++//             //symlink or not - buf it
++//             strcpy(buf, path);
++//             if(filter_it(fd, st, fmtname(path))==0)
++//             {
++//                 printf(1, "%s\n", buf);
++//             }
++//             p = buf+strlen(buf);
++//             if(strcmp(path,"/"))
++//             *p++ = '/';
++//             while(read(fd, &de, sizeof(de)) == sizeof(de))
++//             {
++//                 if(de.inum == 0)
++//                     continue;
++//                 memmove(p, de.name, DIRSIZ);
++//                 p[DIRSIZ] = 0;
++//                 //prevet inifinte loop
++//                 if (de.name[0] == '.')
++//                     continue;
++//                 //if got follow
++//                 //readlink (const char * pathname, char * buf, size_t bufsize)
++//                 memset(sym_path,0,_BUFSIZE);
++//                 if( flag_follow==0 && readlink(buf,sym_path, 60)!=-1 )
++//                 {
++//                     memset(tmp,0,_BUFSIZE);
++//                     strcpy(tmp, buf);
++//                     for(h=tmp+strlen(tmp); h >= tmp && *h != '/'; h--)
++//                     {
++//                         *h=0;
++//                     }
++//                     concatenate(tmp,sym_path);
++
++//                      printf(1,"tmp = %s \n",tmp);
++//                      printf(1,"path = %s \n",buf);
++//                     //recursive on it
++//                     find(sym_path, fmtname(sym_path));
++//                 }
++//                 else
++//                 {
++//                     find(buf, de.name);
++//                 }
++
++//             }
++//             break;
++
++//     } //close switch
++
++//     close(fd);
++
++//      free(buf);
++//      free(sym_path);
++//     return;
++// }
+\ No newline at end of file
+diff --git a/fs.c b/fs.c
+index feb59fe..a34ae99 100644
+--- a/fs.c
++++ b/fs.c
+@@ -20,7 +20,9 @@
+ #include "fs.h"
+ #include "buf.h"
+ #include "file.h"
++#include "fcntl.h"
+ 
++#define MAX_DEREFERENCE 31
+ #define min(a, b) ((a) < (b) ? (a) : (b))
+ static void itrunc(struct inode*);
+ // there should be one superblock per disk device, but we run with
+@@ -223,7 +225,6 @@ iupdate(struct inode *ip)
+ {
+   struct buf *bp;
+   struct dinode *dip;
+-
+   bp = bread(ip->dev, IBLOCK(ip->inum, sb));
+   dip = (struct dinode*)bp->data + ip->inum%IPB;
+   dip->type = ip->type;
+@@ -231,6 +232,8 @@ iupdate(struct inode *ip)
+   dip->minor = ip->minor;
+   dip->nlink = ip->nlink;
+   dip->size = ip->size;
++  dip->tags_dict=ip->tags_dict;
++  dip->num_tags=ip->num_tags;
+   memmove(dip->addrs, ip->addrs, sizeof(ip->addrs));
+   log_write(bp);
+   brelse(bp);
+@@ -304,6 +307,8 @@ ilock(struct inode *ip)
+     ip->minor = dip->minor;
+     ip->nlink = dip->nlink;
+     ip->size = dip->size;
++    ip->tags_dict=dip->tags_dict;
++    ip->num_tags=dip->num_tags;
+     memmove(ip->addrs, dip->addrs, sizeof(ip->addrs));
+     brelse(bp);
+     ip->valid = 1;
+@@ -316,6 +321,18 @@ ilock(struct inode *ip)
+ void
+ iunlock(struct inode *ip)
+ {
++    if(ip == 0)
++    {
++      cprintf("ip=0 iunlock\n");
++    }
++    if(ip->ref <1)
++    {
++      cprintf("ip->ref <1 ip->ref =%d \n",ip->ref);
++    }
++    if(!holdingsleep(&ip->lock))
++    {
++      cprintf("not holding sleep\n");
++    }
+   if(ip == 0 || !holdingsleep(&ip->lock) || ip->ref < 1)
+     panic("iunlock");
+ 
+@@ -373,8 +390,10 @@ iunlockput(struct inode *ip)
+ static uint
+ bmap(struct inode *ip, uint bn)
+ {
++  //addr 0...11(direct) 12(single) 13(double)
+   uint addr, *a;
+   struct buf *bp;
++  struct buf *bp1;
+ 
+   if(bn < NDIRECT){
+     if((addr = ip->addrs[bn]) == 0)
+@@ -391,12 +410,39 @@ bmap(struct inode *ip, uint bn)
+     a = (uint*)bp->data;
+     if((addr = a[bn]) == 0){
+       a[bn] = addr = balloc(ip->dev);
+-      log_write(bp);
++      log_write(bp); //update the block is not-availble (used)
+     }
+     brelse(bp);
+     return addr;
+   }
+ 
++  bn -= NINDIRECT;
++  if(bn < DINDIRECT) // if size of file is in double range
++  {
++    // Load dindirect block, allocating if necessary.
++    if((addr = ip->addrs[NDIRECT+1]) == 0)
++    ip->addrs[NDIRECT+1] = addr = balloc(ip->dev);
++    bp = bread(ip->dev, addr);
++    a = (uint*)bp->data;
++    //
++
++    if((addr = a[bn/NINDIRECT]) == 0){
++      a[bn/NINDIRECT] = addr = balloc(ip->dev);
++      log_write(bp);
++    }
++    brelse(bp);
++    // get data from 2-level a
++    bp1 = bread(ip->dev, addr);
++    a = (uint*)bp1->data;
++    // allocating if necessary
++    if((addr = a[bn%NINDIRECT]) == 0){
++      a[bn%NINDIRECT] = addr = balloc(ip->dev);
++      log_write(bp1);  //update the block is not-availble (used)
++    }
++    brelse(bp1);
++    return addr;
++  }
++  
+   panic("bmap: out of range");
+ }
+ 
+@@ -408,9 +454,10 @@ bmap(struct inode *ip, uint bn)
+ static void
+ itrunc(struct inode *ip)
+ {
+-  int i, j;
+-  struct buf *bp;
++  int i, j, w;
++  struct buf *bp,*bp2;
+   uint *a;
++  uint * b;
+ 
+   for(i = 0; i < NDIRECT; i++){
+     if(ip->addrs[i]){
+@@ -430,7 +477,34 @@ itrunc(struct inode *ip)
+     bfree(ip->dev, ip->addrs[NDIRECT]);
+     ip->addrs[NDIRECT] = 0;
+   }
++  //task 1
++  if(ip->addrs[NDIRECT+1])
++  {
++    bp=bread(ip->dev,ip->addrs[NDIRECT+1]);
++    a=(uint*)bp->data;
++    for(j=0;j<NINDIRECT;j++)
++    {
++      if(a[j])//first table isnt null
++      {
++        bp2=bread(ip->dev,a[j]);
++        b=(uint*)bp2->data;
++        for(w=0;w<NINDIRECT;w++)
++        {
++          if(b[w])
++          {
++            bfree(ip->dev,b[w]);
++          }//b[i]
++        }
++        brelse(bp2);
++        bfree(ip->dev,a[j]);
++      }//a[j]
++    }
+ 
++    brelse(bp);
++    bfree(ip->dev,ip->addrs[NDIRECT+1]);//free main double indirect table
++    ip->addrs[NDIRECT+1]=0;
++  }
++  
+   ip->size = 0;
+   iupdate(ip);
+ }
+@@ -618,24 +692,33 @@ skipelem(char *path, char *name)
+   return path;
+ }
+ 
++
+ // Look up and return the inode for a path name.
+ // If parent != 0, return the inode for the parent and copy the final
+ // path element into name, which must have room for DIRSIZ bytes.
+ // Must be called inside a transaction since it calls iput().
+ static struct inode*
+-namex(char *path, int nameiparent, char *name)
++namex(char *path, int nameiparent, char *name,struct inode * feather_inode,int num_loops,int mode)
+ {
++  if(num_loops>MAX_DEREFERENCE)
++  {
++    return 0;
++  }
+   struct inode *ip, *next;
+-
++  char tmp_name[DIRSIZ];
+   if(*path == '/')
+     ip = iget(ROOTDEV, ROOTINO);
+-  else
++  else if(feather_inode)
++  {
++    ip = idup(feather_inode);
++}
++    else
+     ip = idup(myproc()->cwd);
+-
+   while((path = skipelem(path, name)) != 0){
+     ilock(ip);
+     if(ip->type != T_DIR){
+       iunlockput(ip);
++     // cprintf("ip->type is symlink");
+       return 0;
+     }
+     if(nameiparent && *path == '\0'){
+@@ -645,27 +728,301 @@ namex(char *path, int nameiparent, char *name)
+     }
+     if((next = dirlookup(ip, name, 0)) == 0){
+       iunlockput(ip);
++     // cprintf("failled lookfor dir %s  =name \n",name);
+       return 0;
+     }
+-    iunlockput(ip);
++    iunlock(ip);
++    ilock(next);
++    if(next->type==T_SYM && *path=='\0' && ((mode & O_NO_DERFRENCE)!=0))
++    {
++     // cprintf("last inode in loop nodreference\n");
++      iput(ip);
++      iunlock(next);
++      ip=next;
++      continue;
++    }
++    else if(next->type == T_SYM)
++    {
++      if(*path==0)
++      {
++      //  cprintf("path=0\n");
++     //   cprintf("mode =%x \n",mode);
++      }
++     // cprintf("at t_sym case path =%s \n",path);
++      char* buff=kalloc();
++      memset(buff,0,PGSIZE);
++      if(next->size!=readi(next,buff,0,next->size))
++      {
++        iunlockput(next);
++        iput(ip);
++        kfree(buff);
++        return 0;
++      }
++      buff[next->size]=0;
++//      cprintf("buff =%s \n",buff);
++      iunlockput(next);
++      next=namex(buff,0,tmp_name,ip,num_loops+1,0);//path,isparent,nameptr,inodeofparent,numiter,mode
++      kfree(buff);
++    }
++    else
++    {
++      iunlock(next);
++    }
++    iput(ip);
+     ip = next;
+   }
+   if(nameiparent){
+     iput(ip);
+     return 0;
+   }
++  if(ip->type== T_SYM&& mode==0)
++  {
++  //  panic("bug if mode =0\n");//TOREMOVE
++  }
+   return ip;
+ }
+ 
++
+ struct inode*
+-namei(char *path)
++namei(char *path,int mode)
+ {
+   char name[DIRSIZ];
+-  return namex(path, 0, name);
++  return namex(path, 0, name,0,0,mode);
+ }
+ 
+ struct inode*
+-nameiparent(char *path, char *name)
++nameiparent(char *path, char *name,int mode)
++{
++  return namex(path, 1, name,0,0,mode);
++}
++
++
++//
++static int
++argfd(int n, int *pfd, struct file **pf)
++{
++  int fd;
++  struct file *f;
++
++  if(argint(n, &fd) < 0)
++    return -1;
++  if(fd < 0 || fd >= NOFILE || (f=myproc()->ofile[fd]) == 0)
++    return -1;
++  if(pfd)
++    *pfd = fd;
++  if(pf)
++    *pf = f;
++  return 0;
++}
++
++
++
++
++// TODO - WHAT IS THE MAX PAIRS NUMBER FOR EACH FILE
++int ftag (int fd, const char * key,  const char * value)
++{ 
++  struct file *fd_ptr; 
++  struct inode* ip;
++  struct buf* bp;
++  int i, j;
++  
++  if( (argfd(0,&fd, &fd_ptr) < 0 ) )
++  {
++    return -1;
++  }
++
++  int index_toadd = -1;
++  ip = fd_ptr->ip;
++  ilock(ip);
++
++  if( (ip->num_tags == 0) && (ip->tags_dict ==0) ) //if it is first time to insert 
++  {
++    ip->tags_dict = balloc(ip->dev); //allocate dict
++  }
++
++  bp = bread(ip->dev, ip->tags_dict); //get data to buf
++
++  i=0; 
++  j=0;
++
++  while( i < ip->num_tags )
++  {
++    if ((strlen(key) == strlen((char*)(&bp->data[j]))) &&
++        !(memcmp(key, &(bp->data[j]), strlen(key))))
++    {
++      //KEY FOUND
++
++      memset(&bp->data[j+10], 0, 30); //override the exited val
++      memmove(&bp->data[j+10], value, strlen(value)); 
++
++      ip->num_tags++;
++
++      log_write(bp);
++      brelse(bp);
++      iupdate(ip);
++      iunlock(ip);
++      return 0;
++    }
++
++    // if got to end
++    if(bp->data[j] == 0)
++    {
++      if(index_toadd == -1)
++      {
++        index_toadd = j;
++      }
++
++      i--;   
++    }
++    //inc 
++    i++;
++    j += 40; //key is 10, value is 30, pair is 40 total.
++
++  }
++
++   if (index_toadd == -1)
++   {
++    index_toadd = j;
++   }
++  
++
++  //key not exist, index_toadd is the next available cell
++  memset(&bp->data[index_toadd], 0, 40);
++  memmove(&bp->data[index_toadd], key, strlen(key));
++  memmove(&bp->data[index_toadd+10], value, strlen(value));
++
++  ip->num_tags++;
++
++  log_write(bp);
++  brelse(bp);
++  iupdate(ip);
++  iunlock(ip);
++  
++  return 0;
++}
++
++int funtag (int fd, const char * key)
+ {
+-  return namex(path, 1, name);
++  struct file *fd_ptr; 
++  struct inode* ip;
++  struct buf* bp;
++  int i, j;
++
++  if( (argfd(0,&fd, &fd_ptr) < 0 ) )
++  {
++    return -1;
++  }
++
++  ip = fd_ptr->ip;
++  ilock(ip);
++
++  //if dict is empty - not tags!!
++  if( (ip->num_tags == 0) && (ip->tags_dict ==0) )  //if it is first time to insert 
++  {
++    iunlock(ip);
++    return -1; //allocate dict
++  }
++
++  bp = bread(ip->dev, ip->tags_dict); 
++
++  i = 0;
++  j = 0;
++  while (i < ip->num_tags) 
++  {
++     if ((strlen(key) == strlen((char*)(&bp->data[j]))) &&
++      !(memcmp(key, &(bp->data[j]), strlen(key)))) 
++     {
++      //KEY FOUND
++      memset(&bp->data[j], 0, 40); //reset whole pair entry.
++      ip->num_tags--;
++      log_write(bp);
++      brelse(bp);
++      iupdate(ip);
++      iunlock(ip);
++      return 0;
++     }
++
++     if (bp->data[j] == 0)
++    {
++      i--;
++    }
++
++
++    //inc
++    i++;
++    j += 40;
++
++  }
++
++  //key not found - cant untag - fail !!
++  brelse(bp);
++  iunlock(ip);
++  return -1;
++
++
++
++}
++
++int gettag (int fd, const char * key, char * buf)
++{
++  struct file *fd_ptr; 
++  struct inode* ip;
++  struct buf* bp;
++  int i, j;
++
++  if( (argfd(0,&fd, &fd_ptr) < 0 ) )
++  {
++    return -1;
++  }
++  
++  ip = fd_ptr->ip;
++  ilock(ip);
++
++  if( (ip->num_tags == 0) && (ip->tags_dict ==0) )  //if it is first time to insert 
++  {
++
++    iunlock(ip);
++    return -1; //allocate dict
++  }
++
++
++  bp = bread(ip->dev, ip->tags_dict);
++  i=0;
++  j=0;
++
++  while (i < ip->num_tags) 
++  {
++    if ((strlen(key) == strlen((char*)(&bp->data[j]))) &&
++        !(memcmp(key, &(bp->data[j]), strlen(key)))) 
++    {
++      //KEY FOUND - copy the value 
++      memmove(buf,&bp->data[j+10], 30); 
++
++      log_write(bp);
++      brelse(bp);
++      iupdate(ip);
++      iunlock(ip);
++
++      //The function returns the length of value if successful 
++      return strlen(buf);
++
++    }
++
++    if (bp->data[j] == 0)
++    {
++      i--;
++    }
++
++    //inc
++    i++;
++    j+=40;
++  }
++
++  //key does NOT exist - fail!!
++  log_write(bp);
++  brelse(bp);
++  iupdate(ip);
++  iunlock(ip);
++  return -1;
++
+ }
+diff --git a/fs.h b/fs.h
+index 3214f1d..635253b 100644
+--- a/fs.h
++++ b/fs.h
+@@ -21,9 +21,10 @@ struct superblock {
+   uint bmapstart;    // Block number of first free map block
+ };
+ 
+-#define NDIRECT 12
+-#define NINDIRECT (BSIZE / sizeof(uint))
+-#define MAXFILE (NDIRECT + NINDIRECT)
++#define NDIRECT 12 // 12 direct links
++#define NINDIRECT (BSIZE / sizeof(uint)) // 512/4 = 128 signle        
++#define DINDIRECT ( (NINDIRECT) * (NINDIRECT) ) // 128*128 double
++#define MAXFILE (NDIRECT + NINDIRECT + DINDIRECT) 
+ 
+ // On-disk inode structure
+ struct dinode {
+@@ -32,9 +33,13 @@ struct dinode {
+   short minor;          // Minor device number (T_DEV only)
+   short nlink;          // Number of links to inode in file system
+   uint size;            // Size of file (bytes)
+-  uint addrs[NDIRECT+1];   // Data block addresses
++  uint addrs[NDIRECT+1+1];   // Data block addresses (+double single)
++  uchar padding[128-76]; /* A&T padding to reach 128 bytes size to be divde with 512 */
++  uint tags_dict;   // pointer to the single additional tags block 
++  uint num_tags;
+ };
+ 
++
+ // Inodes per block.
+ #define IPB           (BSIZE / sizeof(struct dinode))
+ 
+diff --git a/fsan.c b/fsan.c
+new file mode 100644
+index 0000000..677a654
+--- /dev/null
++++ b/fsan.c
+@@ -0,0 +1,34 @@
++#include "types.h"
++#include "user.h"
++#include "fcntl.h"
++
++int main(int argc, char *argv[])
++{
++    int fd, i;
++    char kb[1024];
++    /* char ten_kb[1024*10]; */
++    /* char cent_kb[1024*100]; */
++
++    memset(kb, 'z', 1024);
++    /* memset(ten_kb, 'y', 10240); */
++    /* memset(cent_kb, 'x', 102400); */
++
++
++    fd = open("bigfile", O_CREATE | O_RDWR);
++    for (i = 0; i < 1024; i++) {
++        write(fd, kb, sizeof kb);
++        if (i == 5)
++            printf(2, "Finished writing 6KB (direct)\n");
++        if (i == 69)
++            printf(2, "Finished writing 70KB (single indirect)\n");
++        if ((i % 100) == 99)
++            printf(2, "Finished writing %dKB\n", i+1);
++
++    }
++
++    printf(2, "Finished writing 1MB\n");
++
++    close(fd);
++
++    exit();
++}
+\ No newline at end of file
+diff --git a/ftag.c b/ftag.c
+new file mode 100644
+index 0000000..e0f9882
+--- /dev/null
++++ b/ftag.c
+@@ -0,0 +1,87 @@
++#include "types.h"
++#include "user.h"
++#include "fcntl.h"
++
++void checkgettag(int fd,char* key)
++{
++    char buf[50];
++    if (gettag(fd, key,buf) > 0)
++        printf(1, "gettag succeded, key =  %s, val = %s\n",key,buf);
++    else
++        printf(2, "gettag failed, key = %s \n",key);
++}
++
++
++void checkuntag(int fd,char* key)
++{
++    if (funtag(fd, key) == 0)
++        printf(1, "funtag succeded key = %s \n",key);
++    else
++        printf(2, "funtag failed key = %s \n",key);
++}
++
++int get_tag_test(int fd)
++{   
++    printf(1,"\nTest for get tag\n");
++    ftag(fd, "os", "182");
++    checkgettag(fd,"os");
++    ftag(fd, "x", "y");
++    checkgettag(fd,"x");
++    printf(1,"\n\n");
++    return 0;
++}
++
++
++int value_override_test(int fd)
++{   
++    printf(1,"Test for value override\n");
++    
++    ftag(fd, "key3", "value3");
++    checkgettag(fd,"key3");
++
++    ftag(fd, "key3", "c3");
++    checkgettag(fd,"key3");
++
++    printf(1,"\n\n");
++    return 0;
++}
++
++int test_remove_key_get_failed(int fd)
++{
++    printf(1,"Test for gettag after untag\n"); 
++    printf(1,"# tagging\n");
++    ftag(fd, "123456789", "somevalue");
++    checkgettag(fd, "123456789");
++    printf(1,"# untagging\n");
++    checkuntag(fd, "123456789");
++    printf(1,"# gettaging the key which was untagged\n");
++    char buf[50];
++    if (gettag(fd,"123456789",buf) < 0)
++    {
++        printf(2,"succeded - key is really doen't exists\n");
++    }
++    else
++    {
++        printf(2,"failed\n");
++    }
++
++    return 0;
++}
++
++int
++main (int argc, char *argv[])
++	{
++	int fd;
++
++	if ((fd = open("hellooo", O_CREATE | O_RDWR)) < 0) 
++	{
++        printf(2,"ftag: open failed\n");
++        exit();
++	}
++    get_tag_test(fd);
++    value_override_test(fd);
++    test_remove_key_get_failed(fd);
++    
++	close(fd);
++	exit();
++}
+\ No newline at end of file
+diff --git a/ln.c b/ln.c
+index cf8a64e..058886c 100644
+--- a/ln.c
++++ b/ln.c
+@@ -5,11 +5,25 @@
+ int
+ main(int argc, char *argv[])
+ {
+-  if(argc != 3){
++  if(argc < 3){
+     printf(2, "Usage: ln old new\n");
+     exit();
+   }
+-  if(link(argv[1], argv[2]) < 0)
+-    printf(2, "link %s %s: failed\n", argv[1], argv[2]);
+-  exit();
++  if(argc==3)
++  {
++  	if(link(argv[1], argv[2]) < 0)
++   		{ printf(2, "link %s %s: failed\n", argv[1], argv[2]);}
++  	exit();
++  }
++  else
++  {
++  	if(argc==4 && strcmp(argv[1],"-s")==0)
++  	{
++  		if(symlink(argv[2],argv[3])<0)
++  		{
++  			printf(2,"symlink %s %s failled\n",argv[2],argv[3]);
++  		}
++  		exit();
++  	}
++  }
+ }
+diff --git a/ls.c b/ls.c
+index 2862913..0adb9d2 100644
+--- a/ls.c
++++ b/ls.c
+@@ -2,7 +2,7 @@
+ #include "stat.h"
+ #include "user.h"
+ #include "fs.h"
+-
++#include "fcntl.h"
+ char*
+ fmtname(char *path)
+ {
+@@ -29,8 +29,8 @@ ls(char *path)
+   int fd;
+   struct dirent de;
+   struct stat st;
+-
+-  if((fd = open(path, 0)) < 0){
++  printf(1,"at ls with path =%s \n",path);
++  if((fd = open(path,O_NO_DERFRENCE)) < 0){
+     printf(2, "ls: cannot open %s\n", path);
+     return;
+   }
+@@ -45,6 +45,9 @@ ls(char *path)
+   case T_FILE:
+     printf(1, "%s %d %d %d\n", fmtname(path), st.type, st.ino, st.size);
+     break;
++    case T_SYM:
++    printf(1, "%s %d %d %d\n", fmtname(path), st.type, st.ino, st.size);
++    break;
+ 
+   case T_DIR:
+     if(strlen(path) + 1 + DIRSIZ + 1 > sizeof buf){
+@@ -74,7 +77,6 @@ int
+ main(int argc, char *argv[])
+ {
+   int i;
+-
+   if(argc < 2){
+     ls(".");
+     exit();
+diff --git a/mkfs.c b/mkfs.c
+index 8e011a7..8f7efd8 100644
+--- a/mkfs.c
++++ b/mkfs.c
+@@ -80,7 +80,7 @@ main(int argc, char *argv[])
+     fprintf(stderr, "Usage: mkfs fs.img files...\n");
+     exit(1);
+   }
+-
++  
+   assert((BSIZE % sizeof(struct dinode)) == 0);
+   assert((BSIZE % sizeof(struct dirent)) == 0);
+ 
+diff --git a/my b/my
+new file mode 120000
+index 0000000..dccbe8e
+--- /dev/null
++++ b/my
+@@ -0,0 +1 @@
++echo
+\ No newline at end of file
+diff --git a/param.h b/param.h
+index a7e90ef..bc79c03 100644
+--- a/param.h
++++ b/param.h
+@@ -10,5 +10,5 @@
+ #define MAXOPBLOCKS  10  // max # of blocks any FS op writes
+ #define LOGSIZE      (MAXOPBLOCKS*3)  // max data blocks in on-disk log
+ #define NBUF         (MAXOPBLOCKS*3)  // size of disk block cache
+-#define FSSIZE       1000  // size of file system in blocks
++#define FSSIZE       32768  // size of file system in blocks
+ 
+diff --git a/proc.c b/proc.c
+index 806b1b1..707b90a 100644
+--- a/proc.c
++++ b/proc.c
+@@ -140,7 +140,7 @@ userinit(void)
+   p->tf->eip = 0;  // beginning of initcode.S
+ 
+   safestrcpy(p->name, "initcode", sizeof(p->name));
+-  p->cwd = namei("/");
++  p->cwd = namei("/",0);
+ 
+   // this assignment to p->state lets other cores
+   // run this process. the acquire forces the above
+diff --git a/stat.h b/stat.h
+index 8a80933..a846fc2 100644
+--- a/stat.h
++++ b/stat.h
+@@ -1,7 +1,7 @@
+ #define T_DIR  1   // Directory
+ #define T_FILE 2   // File
+ #define T_DEV  3   // Device
+-
++#define T_SYM  4  // symlink
+ struct stat {
+   short type;  // Type of file
+   int dev;     // File system's disk device
+diff --git a/syscall.c b/syscall.c
+index ee85261..d500a88 100644
+--- a/syscall.c
++++ b/syscall.c
+@@ -103,6 +103,12 @@ extern int sys_unlink(void);
+ extern int sys_wait(void);
+ extern int sys_write(void);
+ extern int sys_uptime(void);
++extern int sys_symlink(void);
++extern int sys_readlink(void);
++/*task 3*/
++extern int sys_ftag(void);
++extern int sys_funtag(void);
++extern int sys_gettag(void);
+ 
+ static int (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -126,6 +132,11 @@ static int (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_symlink] sys_symlink,
++[SYS_readlink] sys_readlink,
++[SYS_ftag]   sys_ftag,
++[SYS_funtag] sys_funtag,
++[SYS_gettag] sys_gettag,
+ };
+ 
+ void
+diff --git a/syscall.h b/syscall.h
+index bc5f356..f03124c 100644
+--- a/syscall.h
++++ b/syscall.h
+@@ -20,3 +20,8 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_symlink 22
++#define SYS_readlink 23
++#define SYS_ftag	24
++#define SYS_funtag  25
++#define SYS_gettag	26
+\ No newline at end of file
+diff --git a/sysfile.c b/sysfile.c
+index 87e508b..714606b 100644
+--- a/sysfile.c
++++ b/sysfile.c
+@@ -16,6 +16,10 @@
+ #include "file.h"
+ #include "fcntl.h"
+ 
++
++
++
++
+ // Fetch the nth word-sized system call argument as a file descriptor
+ // and return both the descriptor and the corresponding struct file.
+ static int
+@@ -108,7 +112,6 @@ sys_fstat(void)
+ {
+   struct file *f;
+   struct stat *st;
+-
+   if(argfd(0, 0, &f) < 0 || argptr(1, (void*)&st, sizeof(*st)) < 0)
+     return -1;
+   return filestat(f, st);
+@@ -125,7 +128,7 @@ sys_link(void)
+     return -1;
+ 
+   begin_op();
+-  if((ip = namei(old)) == 0){
++  if((ip = namei(old,O_NO_DERFRENCE)) == 0){
+     end_op();
+     return -1;
+   }
+@@ -141,7 +144,7 @@ sys_link(void)
+   iupdate(ip);
+   iunlock(ip);
+ 
+-  if((dp = nameiparent(new, name)) == 0)
++  if((dp = nameiparent(new, name,O_NO_DERFRENCE)) == 0)
+     goto bad;
+   ilock(dp);
+   if(dp->dev != ip->dev || dirlink(dp, name, ip->inum) < 0){
+@@ -193,7 +196,7 @@ sys_unlink(void)
+     return -1;
+ 
+   begin_op();
+-  if((dp = nameiparent(path, name)) == 0){
++  if((dp = nameiparent(path, name,0)) == 0){
+     end_op();
+     return -1;
+   }
+@@ -245,7 +248,7 @@ create(char *path, short type, short major, short minor)
+   struct inode *ip, *dp;
+   char name[DIRSIZ];
+ 
+-  if((dp = nameiparent(path, name)) == 0)
++  if((dp = nameiparent(path, name,0)) == 0)
+     return 0;
+   ilock(dp);
+ 
+@@ -275,6 +278,7 @@ create(char *path, short type, short major, short minor)
+       panic("create dots");
+   }
+ 
++
+   if(dirlink(dp, name, ip->inum) < 0)
+     panic("create: dirlink");
+ 
+@@ -290,27 +294,37 @@ sys_open(void)
+   int fd, omode;
+   struct file *f;
+   struct inode *ip;
+-
++  int mode=0;
+   if(argstr(0, &path) < 0 || argint(1, &omode) < 0)
+     return -1;
+ 
+   begin_op();
++  if((omode & O_NO_DERFRENCE) !=0)
++  {
++    omode=omode&(~O_NO_DERFRENCE);
++   // cprintf("mode  no derference\n");
++    mode=O_NO_DERFRENCE;
++  }
+ 
+   if(omode & O_CREATE){
+     ip = create(path, T_FILE, 0, 0);
+     if(ip == 0){
+       end_op();
++      //      cprintf("failledopen0\n");
++
+       return -1;
+     }
+   } else {
+-    if((ip = namei(path)) == 0){
+-      end_op();
++    if((ip = namei(path,mode)) == 0){
++    end_op();
++        //    cprintf("failledopen1\n");
+       return -1;
+     }
+     ilock(ip);
+     if(ip->type == T_DIR && omode != O_RDONLY){
+       iunlockput(ip);
+       end_op();
++      //cprintf("failledopen2\n");
+       return -1;
+     }
+   }
+@@ -320,6 +334,7 @@ sys_open(void)
+       fileclose(f);
+     iunlockput(ip);
+     end_op();
++    //cprintf("failled open3\n");
+     return -1;
+   }
+   iunlock(ip);
+@@ -377,7 +392,7 @@ sys_chdir(void)
+   struct proc *curproc = myproc();
+   
+   begin_op();
+-  if(argstr(0, &path) < 0 || (ip = namei(path)) == 0){
++  if(argstr(0, &path) < 0 || (ip = namei(path,0)) == 0){
+     end_op();
+     return -1;
+   }
+@@ -443,3 +458,129 @@ sys_pipe(void)
+   fd[1] = fd1;
+   return 0;
+ }
++
++
++
++
++
++
++int sys_symlink(void)
++{
++  char *old, *new;
++  
++   struct inode *ip;
++    if(argstr(0, &old) < 0 || argstr(1, &new) < 0)
++      return -1;
++    begin_op();
++    if((ip = create(new, T_SYM,0,0)) == 0){
++      end_op();
++      return -1;
++    }
++    ip->type = T_SYM;
++    iupdate(ip);      // update on-disk data
++    writei(ip, old, 0, strlen(old));    // write the old path into the inode of the new one
++    iunlockput(ip);
++    end_op();
++    return 0;
++    }
++int sys_readlink(void)
++{
++  char* path;
++  char* buf;
++  size_t bufsize;
++
++    if((argstr(0, &path) < 0) ||(argstr(1, &buf) < 0)|| (argint(2,(int*)&bufsize)<0))
++    {
++      return -1;
++    }
++
++    if(bufsize<strlen(path))
++    {
++      return -1;
++    }
++    //char tmp[100]={0};
++   // struct inode * ip= namex(path,0,tmp,0,0,O_NO_DERFRENCE);
++      struct inode * ip =namei(path,O_NO_DERFRENCE);
++    if(ip==0)
++    {
++      return -1;
++    }
++    if(ip->type!= T_SYM)
++    {
++      return -1;
++    }
++
++    readi(ip,buf,0,ip->size);
++  return 0;
++}
++
++
++int sys_ftag(void)
++{
++  int fd;
++  char* key;
++  char* value;
++  int ret_val;
++
++  if((argint(0, &fd) < 0) ||(argstr(1, &key) < 0) || (argstr(2, &value) < 0))
++  {
++      return -1;
++  } 
++
++  if( (strlen(key) > 10) || (strlen(value) > 30) )
++  {
++    return -1;
++  }
++
++   begin_op();
++
++   ret_val = ftag(fd, key, value);
++   end_op();
++   return ret_val;
++}
++
++int sys_funtag(void)
++{
++
++ int fd;  
++ int ret_val;
++ char* key;
++
++ if((argint(0, &fd) < 0) ||(argstr(1, &key) < 0) )
++  {
++      return -1;
++  } 
++
++  if( (strlen(key) > 10) )
++  {
++    return -1;
++  }
++
++  begin_op();
++  ret_val =  funtag(fd,key);
++  end_op();
++  return ret_val;
++  //return 0;
++}
++
++int sys_gettag(void)
++{
++
++  int fd;
++  char* key;
++  char* buf;
++  int ret_val;
++
++  if((argint(0, &fd) < 0) || (argstr(1, &key) < 0) || (argstr(2, &buf) < 0) )
++  {
++      return -1;
++  }  
++
++  begin_op();
++
++  ret_val = gettag(fd,key,buf);
++
++  end_op();
++  return ret_val;
++ //return 0; 
++}
+\ No newline at end of file
+diff --git a/types.h b/types.h
+index e4adf64..fd58be1 100644
+--- a/types.h
++++ b/types.h
+@@ -2,3 +2,4 @@ typedef unsigned int   uint;
+ typedef unsigned short ushort;
+ typedef unsigned char  uchar;
+ typedef uint pde_t;
++//typedef uint size_t;
+\ No newline at end of file
+diff --git a/ulib.c b/ulib.c
+index 51a9e74..52e752f 100644
+--- a/ulib.c
++++ b/ulib.c
+@@ -73,7 +73,7 @@ stat(char *n, struct stat *st)
+   int fd;
+   int r;
+ 
+-  fd = open(n, O_RDONLY);
++  fd = open(n, O_RDONLY|O_NO_DERFRENCE);
+   if(fd < 0)
+     return -1;
+   r = fstat(fd, st);
+diff --git a/user.h b/user.h
+index f45b8d5..c590ca5 100644
+--- a/user.h
++++ b/user.h
+@@ -1,6 +1,8 @@
+ struct stat;
+ struct rtcdate;
+ 
++
++typedef uint size_t;
+ // system calls
+ int fork(void);
+ int exit(void) __attribute__((noreturn));
+@@ -23,6 +25,12 @@ int getpid(void);
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++int symlink(const char* ,const char*);
++int readlink(const char*,char*,size_t);
++/*task 3*/
++int ftag (int , const char * , const char *);
++int funtag (int , const char *);
++int gettag (int , const char *, char * );
+ 
+ // ulib.c
+ int stat(char*, struct stat*);
+diff --git a/usertests.c b/usertests.c
+index a1e97e7..cfd3216 100644
+--- a/usertests.c
++++ b/usertests.c
+@@ -927,7 +927,6 @@ bigdir(void)
+       exit();
+     }
+   }
+-
+   printf(1, "bigdir ok\n");
+ }
+ 
+diff --git a/usys.S b/usys.S
+index 8bfd8a1..f3794e9 100644
+--- a/usys.S
++++ b/usys.S
+@@ -29,3 +29,8 @@ SYSCALL(getpid)
+ SYSCALL(sbrk)
+ SYSCALL(sleep)
+ SYSCALL(uptime)
++SYSCALL(symlink)
++SYSCALL(readlink)
++SYSCALL(ftag)
++SYSCALL(funtag)
++SYSCALL(gettag)
+\ No newline at end of file
