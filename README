@@ -1,3 +1,3 @@
-extend the xv6  file  system.<br/ >
-Xv6 implements a Unix - Like inode based file system, and when running on top of QEMU, stores its data on a virtual IDE disk (fs.img) for persistence.<br/ >
+extend the xv6  file  system.
+Xv6 implements a Unix - Like inode based file system, and when running on top of QEMU, stores its data on a virtual IDE disk (fs.img) for persistence.
 https://www.cs.bgu.ac.il/~os182/wiki.files/Assignment4_V3.pdf
